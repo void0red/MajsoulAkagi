@@ -63,9 +63,9 @@ class MjaiPlayerClient:
     def delete_bot(self):
         self.bot = None
 
-    def restart_bot(self, player_id: int) -> None:
+    def restart_bot(self, player_id: int, is_3p=False) -> None:
         self.delete_bot()
-        self.launch_bot(player_id)
+        self.launch_bot(player_id, is_3p)
 
     def react(self, events: str) -> str:
         if self.bot is None:

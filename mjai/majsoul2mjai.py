@@ -441,7 +441,7 @@ class MajsoulBridge:
             #     pass
             self.mjai_message.append({"type": "end_game"})
             self.react(self.mjai_client)
-            self.mjai_client.restart_bot(self.seat)
+            self.mjai_client.restart_bot(self.seat, self.is_3p)
             return None
         return None
 
