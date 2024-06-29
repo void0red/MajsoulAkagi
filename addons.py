@@ -3,83 +3,135 @@ from mitmproxy import http, ctx
 import liqi_new
 from plugin import helper, mod
 from ruamel.yaml import YAML
-from sys import stdout
+import sys
+import signal
+import time
 from plugin import update_liqi
+import mjai
+from rich import print, get_console
+import multiprocessing
+import threading
+
+console = get_console()
+
+
+def signal_handler(sig, frame):
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, signal_handler)
+
 
 logger.remove()
-logger.add(stdout, colorize=True,
-           format='<cyan>[{time:HH:mm:ss.SSS}]</cyan> <level>{message}</level>')
+log_file = f"log/log_{int(time.time())}.log"
+logger.add(
+    log_file,
+    colorize=True,
+    format="<cyan>[{time:HH:mm:ss.SSS}]</cyan> <level>{message}</level>",
+)
 # 导入配置
 yaml = YAML()
-SETTINGS = yaml.load('''\
-# 插件配置，true为开启，false为关闭
+SETTINGS = yaml.load(
+    """\
+# 插件配置,true为开启,false为关闭
 plugin_enable:
   mod: true  # mod用于解锁全部角色、皮肤、装扮等
-  helper: false  # helper用于将对局发送至雀魂小助手，不使用小助手请勿开启
+  helper: false  # helper用于将对局发送至雀魂小助手,不使用小助手请勿开启
 # liqi用于解析雀魂消息
 liqi:
   auto_update: true  # 是否自动更新
   liqi_version: 'v0.11.36.w'  # 本地liqi文件版本
-''')
+"""
+)
 try:
-    with open('./config/settings.yaml', 'r', encoding='utf-8') as f:
+    with open("./config/settings.yaml", "r", encoding="utf-8") as f:
         SETTINGS.update(yaml.load(f))
 except:
     logger.warning(
-        '''首次运行，默认启用mod，禁用helper\n
-        如需使用，请修改./config/settings.yaml文件\n
+        """首次运行,默认启用mod,禁用helper\n
+        如需使用,请修改./config/settings.yaml文件\n
         修改完成后重新启动即可\n
-        ''')
+        """
+    )
 
 
-MOD_ENABLE = SETTINGS['plugin_enable']['mod']
-HELPER_ENABLE = SETTINGS['plugin_enable']["helper"]
-if SETTINGS['liqi']['auto_update']:
-    logger.info('正在检测liqi文件更新，请稍候……')
+MOD_ENABLE = SETTINGS["plugin_enable"]["mod"]
+HELPER_ENABLE = SETTINGS["plugin_enable"]["helper"]
+if SETTINGS["liqi"]["auto_update"]:
+    logger.info("正在检测liqi文件更新,请稍候……")
     try:
-        SETTINGS['liqi']['liqi_version'] = update_liqi.update(
-            SETTINGS['liqi']['liqi_version'])
+        SETTINGS["liqi"]["liqi_version"] = update_liqi.update(
+            SETTINGS["liqi"]["liqi_version"]
+        )
     except:
-        logger.critical('liqi文件更新失败！可能会导致部分消息无法解析！')
-with open('./config/settings.yaml', 'w', encoding='utf-8') as f:
+        logger.critical("liqi文件更新失败!可能会导致部分消息无法解析!")
+with open("./config/settings.yaml", "w", encoding="utf-8") as f:
     yaml.dump(SETTINGS, f)
 logger.success(
-    f'''已载入配置：\n
+    f"""已载入配置:\n
     启用mod: {MOD_ENABLE}\n
-    启用helper：{HELPER_ENABLE}\n
-    ''')
+    启用helper:{HELPER_ENABLE}\n
+    """
+)
 if MOD_ENABLE:
     mod_plugin = mod.mod()
 if HELPER_ENABLE:
     helper_plugin = helper.helper()
 liqi_proto = liqi_new.LiqiProto()
 if not (MOD_ENABLE or HELPER_ENABLE):
-    logger.warning('请注意，当前没有开启任何功能，请修改./config/settings.yaml文件并重新启动！')
+    logger.warning(
+        "请注意,当前没有开启任何功能,请修改./config/settings.yaml文件并重新启动!"
+    )
 
 
 class WebSocketAddon:
+    def __init__(self) -> None:
+        self.liqi: dict[str, mjai.LiqiProto] = {}
+        self.bridge: dict[str, mjai.MajsoulBridge] = {}
+
+    def websocket_start(self, flow: http.HTTPFlow):
+        self.liqi[flow.id] = mjai.LiqiProto()
+        self.bridge[flow.id] = mjai.MajsoulBridge()
+
     def websocket_message(self, flow: http.HTTPFlow):
         # 在捕获到WebSocket消息时触发
         assert flow.websocket is not None  # make type checker happy
         message = flow.websocket.messages[-1]
+        liqi_msg = self.liqi[flow.id].parse(message)
+        mjai_msg = self.bridge[flow.id].input(liqi_msg)
+
+        if mjai_msg:
+            logger.info(f"[mjai]: {mjai_msg}")
+            recommend = mjai.meta_to_recommend(
+                mjai_msg["meta"], self.bridge[flow.id].is_3p
+            )
+            console.clear()
+            console.rule("Mortal & Akagi", characters="=")
+            print(recommend)
+            console.rule(characters="=")
+        else:
+            logger.error(f"[mjai]: no response from miji bot")
+
         # 不解析ob消息
-        if flow.request.path == '/ob':
+        if flow.request.path == "/ob":
             if message.from_client is False:
-                logger.debug(f'接收到（未解析）：{message.content}')
+                logger.debug(f"接收到(未解析):{message.content}")
             else:
-                logger.debug(f'已发送（未解析）：{message.content}')
+                logger.debug(f"已发送(未解析):{message.content}")
             return
         # 解析proto消息
         if MOD_ENABLE:
-            # 如果启用mod，就把消息丢进mod里
+            # 如果启用mod,就把消息丢进mod里
             if not message.injected:
                 modify, drop, msg, inject, inject_msg = mod_plugin.main(
-                    message, liqi_proto)
+                    message, liqi_proto
+                )
                 if drop:
                     message.drop()
                 if inject:
                     ctx.master.commands.call(
-                        "inject.websocket", flow, True, inject_msg, False)
+                        "inject.websocket", flow, True, inject_msg, False
+                    )
                 if modify:
                     # 如果被mod修改就同步变更
                     message.content = msg
@@ -87,29 +139,31 @@ class WebSocketAddon:
             result = liqi_proto.parse(message)
         except:
             if message.from_client is False:
-                logger.error(f'接收到(error):{result}')
+                logger.error(f"接收到(error):{result}")
             else:
-                logger.error(f'已发送(error):{result}')
+                logger.error(f"已发送(error):{result}")
         else:
             if message.from_client is False:
                 if message.injected:
-                    logger.success(f'接收到(injected)：{result}')
+                    logger.success(f"接收到(injected):{result}")
                 elif MOD_ENABLE and modify:
-                    logger.success(f'接收到(modify)：{result}')
+                    logger.success(f"接收到(modify):{result}")
                 elif MOD_ENABLE and drop:
-                    logger.success(f'接收到(drop)：{result}')
+                    logger.success(f"接收到(drop):{result}")
                 else:
-                    logger.info(f'接收到：{result}')
+                    logger.info(f"接收到:{result}")
                 if HELPER_ENABLE:
-                    # 如果启用helper，就把消息丢进helper里
+                    # 如果启用helper,就把消息丢进helper里
                     helper_plugin.main(result)
             else:
                 if MOD_ENABLE and modify:
-                    logger.success(f'已发送(modify)：{result}')
+                    logger.success(f"已发送(modify):{result}")
                 else:
-                    logger.info(f'已发送：{result}')
+                    logger.info(f"已发送:{result}")
+
+    def websocket_end(self, flow: http.HTTPFlow):
+        self.liqi.pop(flow.id, None)
+        self.bridge.pop(flow.id, None)
 
 
-addons = [
-    WebSocketAddon()
-]
+addons = [WebSocketAddon()]
