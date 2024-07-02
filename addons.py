@@ -9,8 +9,6 @@ import time
 from plugin import update_liqi
 import mjai
 from rich import print, get_console
-import multiprocessing
-import threading
 
 console = get_console()
 
@@ -89,11 +87,11 @@ class WebSocketAddon:
         self.liqi: dict[str, mjai.LiqiProto] = {}
         self.bridge: dict[str, mjai.MajsoulBridge] = {}
 
-    def websocket_start(self, flow: http.HTTPFlow):
+    async def websocket_start(self, flow: http.HTTPFlow):
         self.liqi[flow.id] = mjai.LiqiProto()
         self.bridge[flow.id] = mjai.MajsoulBridge()
 
-    def websocket_message(self, flow: http.HTTPFlow):
+    async def websocket_message(self, flow: http.HTTPFlow):
         # 在捕获到WebSocket消息时触发
         assert flow.websocket is not None  # make type checker happy
         message = flow.websocket.messages[-1]
@@ -161,7 +159,7 @@ class WebSocketAddon:
                 else:
                     logger.info(f"已发送:{result}")
 
-    def websocket_end(self, flow: http.HTTPFlow):
+    async def websocket_end(self, flow: http.HTTPFlow):
         self.liqi.pop(flow.id, None)
         self.bridge.pop(flow.id, None)
 

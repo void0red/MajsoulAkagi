@@ -11,7 +11,6 @@ import subprocess
 import atexit
 from pathlib import Path
 import threading
-from rich import print
 
 urllib3.disable_warnings()
 
@@ -61,10 +60,12 @@ class helper:
         #         return
         file = Path(__file__).parent / "mahjong-helper.exe"
         self.helper = subprocess.Popen(
-            [file, "-majsoul", "-p", str(self.port)],
+            [file, "-majsoul", "-p", str(self.port), "-force-color"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            encoding="utf-8",
+            shell=True,
         )
         self.out_pipe = self.helper.stdout
         threading.Thread(target=self.read_helper, daemon=True).start()
@@ -74,7 +75,7 @@ class helper:
         while True:
             if self.helper.poll():
                 break
-            line = self.out_pipe.readline().decode(errors="ignore")
+            line = self.out_pipe.readline()
             print(line, end="")
 
     def stop_helper(self):
