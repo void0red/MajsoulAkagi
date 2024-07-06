@@ -1,6 +1,3 @@
-import json
-import gzip
-import requests
 import numpy as np
 import torch
 import pathlib
@@ -10,9 +7,8 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_sequence
 from torch.distributions import Normal, Categorical
 from typing import *
 from functools import partial
-from itertools import permutations
-from .libriichi3p.mjai import Bot
-from .libriichi3p.consts import obs_shape, oracle_obs_shape, ACTION_SPACE, GRP_SIZE
+from . import libriichi3p
+import riichi
 
 
 class ChannelAttention(nn.Module):
@@ -121,10 +117,18 @@ class ResNet(nn.Module):
 
 
 class Brain(nn.Module):
-    def __init__(self, *, conv_channels, num_blocks, is_oracle=False, version=1):
+    def __init__(
+        self, *, conv_channels, num_blocks, is_oracle=False, version=1, is_3p=False
+    ):
         super().__init__()
         self.is_oracle = is_oracle
         self.version = version
+        if is_3p:
+            obs_shape = libriichi3p.consts.obs_shape
+            oracle_obs_shape = libriichi3p.consts.oracle_obs_shape
+        else:
+            obs_shape = riichi.consts.obs_shape
+            oracle_obs_shape = riichi.consts.oracle_obs_shape
 
         in_channels = obs_shape(version)[0]
         if is_oracle:
@@ -216,13 +220,18 @@ class AuxNet(nn.Module):
 
 
 class DQN(nn.Module):
-    def __init__(self, *, version=1):
+    def __init__(self, *, version=1, is_3p=False):
         super().__init__()
         self.version = version
+        if is_3p:
+            self.ACTION_SPACE = libriichi3p.consts.ACTION_SPACE
+        else:
+            self.ACTION_SPACE = riichi.consts.ACTION_SPACE
+
         match version:
             case 1:
                 self.v_head = nn.Linear(512, 1)
-                self.a_head = nn.Linear(512, ACTION_SPACE)
+                self.a_head = nn.Linear(512, self.ACTION_SPACE)
             case 2 | 3:
                 hidden_size = 512 if version == 2 else 256
                 self.v_head = nn.Sequential(
@@ -233,15 +242,15 @@ class DQN(nn.Module):
                 self.a_head = nn.Sequential(
                     nn.Linear(1024, hidden_size),
                     nn.Mish(inplace=True),
-                    nn.Linear(hidden_size, ACTION_SPACE),
+                    nn.Linear(hidden_size, self.ACTION_SPACE),
                 )
             case 4:
-                self.net = nn.Linear(1024, 1 + ACTION_SPACE)
+                self.net = nn.Linear(1024, 1 + self.ACTION_SPACE)
                 nn.init.constant_(self.net.bias, 0)
 
     def forward(self, phi, mask):
         if self.version == 4:
-            v, a = self.net(phi).split((1, ACTION_SPACE), dim=-1)
+            v, a = self.net(phi).split((1, self.ACTION_SPACE), dim=-1)
         else:
             v = self.v_head(phi)
             a = self.a_head(phi)
@@ -263,14 +272,10 @@ class MortalEngine:
         stochastic_latent=False,
         enable_amp=False,
         enable_quick_eval=True,
-        enable_rule_based_agari_guard=False,
         name="NoName",
         boltzmann_epsilon=0,
         boltzmann_temp=1,
         top_p=1,
-        online=False,
-        api_key=None,
-        server=None,
     ):
         self.engine_type = "mortal"
         self.device = device or torch.device("cpu")
@@ -283,54 +288,13 @@ class MortalEngine:
 
         self.enable_amp = enable_amp
         self.enable_quick_eval = enable_quick_eval
-        self.enable_rule_based_agari_guard = enable_rule_based_agari_guard
         self.name = name
 
         self.boltzmann_epsilon = boltzmann_epsilon
         self.boltzmann_temp = boltzmann_temp
         self.top_p = top_p
 
-        self.online = online
-        self.api_key = api_key
-        self.server = server
-        if self.online:
-            assert self.version == 4, "To use online, local model version must be 4"
-
     def react_batch(self, obs, masks, invisible_obs):
-        if self.online:
-            global online_valid
-            try:
-                list_obs = [o.tolist() for o in obs]
-                list_masks = [m.tolist() for m in masks]
-                post_data = {
-                    "obs": list_obs,
-                    "masks": list_masks,
-                }
-                data = json.dumps(post_data, separators=(",", ":"))
-                compressed_data = gzip.compress(data.encode("utf-8"))
-                headers = {
-                    "Authorization": self.api_key,
-                    "Content-Encoding": "gzip",
-                }
-                r = requests.post(
-                    f"{self.server}/react_batch_3p",
-                    headers=headers,
-                    data=compressed_data,
-                    timeout=2,
-                )
-                assert r.status_code == 200
-                online_valid = True
-                r_json = r.json()
-                return (
-                    r_json["actions"],
-                    r_json["q_out"],
-                    r_json["masks"],
-                    r_json["is_greedy"],
-                )
-            except:
-                online_valid = False
-                pass
-
         with (
             torch.autocast(self.device.type, enabled=self.enable_amp),
             torch.no_grad(),
@@ -391,7 +355,7 @@ def sample_top_p(logits, p):
     return sampled
 
 
-def get_engine() -> MortalEngine:
+def get_engine(is_3p: bool) -> MortalEngine:
     # check if GPU is available
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -401,7 +365,10 @@ def get_engine() -> MortalEngine:
     # control_state_file = "./mortal_offline_v6_510k.pth"
 
     # latest binary model
-    control_state_file = "./mortal.pth"
+    if is_3p:
+        control_state_file = "./mortal_3p.pth"
+    else:
+        control_state_file = "./mortal_4p.pth"
 
     # Get the path of control_state_file = current directory / control_state_file
     control_state_file = pathlib.Path(__file__).parent / control_state_file
@@ -411,16 +378,11 @@ def get_engine() -> MortalEngine:
         version=state["config"]["control"]["version"],
         conv_channels=state["config"]["resnet"]["conv_channels"],
         num_blocks=state["config"]["resnet"]["num_blocks"],
+        is_3p=is_3p,
     ).eval()
-    dqn = DQN(version=state["config"]["control"]["version"]).eval()
+    dqn = DQN(version=state["config"]["control"]["version"], is_3p=is_3p).eval()
     mortal.load_state_dict(state["mortal"])
     dqn.load_state_dict(state["current_dqn"])
-
-    # with open(pathlib.Path(__file__).parent.parent / 'online.json', 'r') as f:
-    #     json_load = json.load(f)
-    #     server = json_load['server']
-    #     online = json_load['online']
-    #     api_key = json_load['api_key']
 
     engine = MortalEngine(
         mortal,
@@ -429,7 +391,6 @@ def get_engine() -> MortalEngine:
         device=device,
         enable_amp=False,
         enable_quick_eval=False,
-        enable_rule_based_agari_guard=True,
         name="mortal",
         version=state["config"]["control"]["version"],
     )
@@ -437,9 +398,9 @@ def get_engine() -> MortalEngine:
     return engine
 
 
-def load_model(seat: int) -> Bot:
-
-    engine = get_engine()
-
-    bot = Bot(engine, seat)
-    return bot
+def load_model(seat: int, is_3p: bool):
+    engine = get_engine(is_3p)
+    if is_3p:
+        return libriichi3p.mjai.Bot(engine, seat)
+    else:
+        return riichi.mjai.Bot(engine, seat)
